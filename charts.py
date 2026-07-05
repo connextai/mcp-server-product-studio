@@ -63,6 +63,10 @@ TEMPLATE = r"""<!doctype html>
           return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
         }
         function el(id) { return document.getElementById(id); }
+        function postSize() {
+          var h = Math.ceil(document.documentElement.scrollHeight || document.body.scrollHeight || 0);
+          if (h > 0) post({ jsonrpc: RPC, method: "ui/notifications/size-changed", params: { height: h } });
+        }
 
         // --- roadmap bar (single series) ---
         function bar(counts) {
@@ -129,6 +133,7 @@ TEMPLATE = r"""<!doctype html>
             chart.innerHTML = '<div class="empty">No chart data for this request.</div>';
             legend.style.display = "none";
           }
+          if (window.requestAnimationFrame) window.requestAnimationFrame(postSize); else postSize();
         }
 
         function applyTheme(hc) {
@@ -152,6 +157,10 @@ TEMPLATE = r"""<!doctype html>
           }
         });
 
+        // Report content height so the host sizes the iframe to fit (no scroll).
+        // ResizeObserver catches the chart render + any reflow (theme/font/width).
+        if (window.ResizeObserver) new window.ResizeObserver(postSize).observe(document.body);
+        postSize();
         post({ jsonrpc: RPC, id: INIT_ID, method: "ui/initialize",
                params: { protocolVersion: "2026-01-26", appCapabilities: {} } });
       })();
