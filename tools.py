@@ -29,9 +29,16 @@ import rag
 CHART_URI = "ui://product-studio/chart"
 CHART_MIME = "text/html;profile=mcp-app"
 
-# run_sql is defence-in-depth: the connection is already read-only (mode=ro), and
-# we additionally require a single read-only statement.
+# run_sql is defence-in-depth. The connection is already read-only (mode=ro,
+# the real guard), and we additionally require a single statement that STARTS
+# with select/with AND contains no write/DDL keyword — so the guard is safe even
+# if someone reuses it without mode=ro (e.g. a `WITH cte AS (...) INSERT ...`).
 _READ_ONLY_START = re.compile(r"^\s*(select|with)\b", re.IGNORECASE)
+_WRITE_KEYWORDS = re.compile(
+    r"\b(insert|update|delete|drop|create|alter|replace|attach|detach|pragma|"
+    r"vacuum|reindex|trigger|grant|revoke)\b",
+    re.IGNORECASE,
+)
 _MAX_ROWS = 200
 
 
@@ -82,6 +89,8 @@ def register_tools(mcp: FastMCP) -> None:
             raise ValueError("Only a single statement is allowed (no ';').")
         if not _READ_ONLY_START.match(sql):
             raise ValueError("Only read-only SELECT/WITH queries are allowed.")
+        if _WRITE_KEYWORDS.search(sql):
+            raise ValueError("Only read-only queries are allowed (write/DDL keyword found).")
         conn = db.connect_readonly()
         try:
             cur = conn.execute(sql)
