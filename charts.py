@@ -1,164 +1,165 @@
-"""Inline-SVG chart builders for the ``chart`` MCP App.
+"""The chart MCP App — one dynamic ``ui://`` template.
 
-Two small, self-contained, theme-aware charts derived from the product data:
+The Connext platform renders an MCP App by doing ``resources/read`` on the
+``ui://`` resource and delivering the tool's ``structuredContent`` to it over the
+SEP-1865 JSON-RPC bridge (``postMessage``). So the chart is **not** rendered
+server-side — this template's inline JavaScript implements the bridge
+(``ui/initialize`` → ``ui/notifications/initialized`` → receive
+``ui/notifications/tool-result``), reads the tool's ``structuredContent``, and
+draws the SVG in the browser. One template serves both chart tools; it picks the
+chart from the data shape (``counts`` -> roadmap bar, ``weeks`` -> adoption line).
 
-  * ``roadmap_bar``     — a single-series magnitude chart: feature count per NPD
-                          stage (idea → ga), one hue.
-  * ``adoption_line``   — a two-series time chart: adoption + retention over the
-                          weeks, with a legend and direct end-labels.
-
-Design follows the dataviz method: thin marks, recessive grid/axes, a legend for
-the 2-series chart plus direct labels (which also satisfies the light-surface
-relief rule for the aqua series), and a **validated** 2-colour palette
-(blue #2a78d6 / aqua #1baf7a on light, #3987e5 / #199e70 on dark — CVD ΔE 73.6).
-Everything is inline SVG + CSS (no scripts, no external assets) so it renders
-under the MCP App iframe's strict Content-Security-Policy, and it uses the host's
-``--mcp-color-*`` theme variables so it matches light/dark automatically.
+Self-contained (inline CSS + JS, no external assets) so it renders under the MCP
+App iframe's strict CSP, and theme-aware via the host's CSS-variable tokens
+(``hostContext.styles.variables``) + the ``data-theme`` mode. The data colours
+are a validated categorical pair (blue/aqua). The template is a raw string literal
+so the JS braces are literal text, not Python format fields.
 """
 
 from __future__ import annotations
 
-STAGE_ORDER = ["idea", "discovery", "design", "build", "beta", "ga"]
-
-
-def _esc(s: str) -> str:
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
-# --- 1. Roadmap: feature count per stage (single series) --------------------
-def roadmap_bar(counts: dict[str, int]) -> str:
-    """SVG bar chart of feature counts per stage (stages in NPD order)."""
-    W, H = 560, 280
-    pad_l, pad_r, pad_t, pad_b = 34, 14, 26, 46
-    pw, ph = W - pad_l - pad_r, H - pad_t - pad_b
-    data = [(s, counts.get(s, 0)) for s in STAGE_ORDER]
-    vmax = max([c for _, c in data] + [1])
-    n = len(data)
-    slot = pw / n
-    bw = slot * 0.56
-    bars, labels = [], []
-    for i, (stage, c) in enumerate(data):
-        x = pad_l + i * slot + (slot - bw) / 2
-        bh = (c / vmax) * ph
-        y = pad_t + ph - bh
-        # 4px rounded top, anchored to the baseline.
-        bars.append(
-            f'<rect x="{x:.1f}" y="{y:.1f}" width="{bw:.1f}" height="{max(bh,0.5):.1f}" '
-            f'rx="4" fill="var(--c-blue)"/>'
-        )
-        if c:
-            labels.append(
-                f'<text x="{x + bw / 2:.1f}" y="{y - 6:.1f}" class="val">{c}</text>'
-            )
-        labels.append(
-            f'<text x="{x + bw / 2:.1f}" y="{pad_t + ph + 16:.1f}" class="cat">'
-            f"{_esc(stage)}</text>"
-        )
-    baseline = (
-        f'<line x1="{pad_l}" y1="{pad_t + ph:.1f}" x2="{W - pad_r}" '
-        f'y2="{pad_t + ph:.1f}" class="axis"/>'
-    )
-    return (
-        f'<svg viewBox="0 0 {W} {H}" width="100%" role="img" '
-        f'aria-label="Features by stage">{baseline}{"".join(bars)}'
-        f'{"".join(labels)}</svg>'
-    )
-
-
-# --- 2. Adoption + retention over time (two series) -------------------------
-def adoption_line(weeks: list[str], adoption: list[float], retention: list[float]) -> str:
-    """SVG line chart of adoption + retention (fractions) over the weeks."""
-    W, H = 560, 280
-    pad_l, pad_r, pad_t, pad_b = 36, 74, 22, 34
-    pw, ph = W - pad_l - pad_r, H - pad_t - pad_b
-    n = max(len(weeks), 1)
-    xs = [pad_l + (pw * i / max(n - 1, 1)) for i in range(n)]
-
-    def y(v: float) -> float:
-        return pad_t + ph - v * ph  # 0..1 maps to full height
-
-    grid = []
-    for g in (0.0, 0.25, 0.5, 0.75, 1.0):
-        gy = y(g)
-        grid.append(
-            f'<line x1="{pad_l}" y1="{gy:.1f}" x2="{pad_l + pw:.1f}" y2="{gy:.1f}" '
-            f'class="grid"/>'
-            f'<text x="{pad_l - 6}" y="{gy + 3:.1f}" class="tick">{int(g * 100)}%</text>'
-        )
-
-    def polyline(vals: list[float], var: str) -> str:
-        pts = " ".join(f"{xs[i]:.1f},{y(v):.1f}" for i, v in enumerate(vals))
-        dots = "".join(
-            f'<circle cx="{xs[i]:.1f}" cy="{y(v):.1f}" r="2.5" fill="var({var})"/>'
-            for i, v in enumerate(vals)
-        )
-        return (
-            f'<polyline points="{pts}" fill="none" stroke="var({var})" '
-            f'stroke-width="2"/>{dots}'
-        )
-
-    # Direct end-labels (also the light-surface relief for the aqua series).
-    end_labels = ""
-    if n:
-        end_labels = (
-            f'<text x="{xs[-1] + 8:.1f}" y="{y(adoption[-1]) + 3:.1f}" '
-            f'class="end" style="fill:var(--c-blue)">Adoption</text>'
-            f'<text x="{xs[-1] + 8:.1f}" y="{y(retention[-1]) + 3:.1f}" '
-            f'class="end" style="fill:var(--c-aqua)">Retention</text>'
-        )
-    return (
-        f'<svg viewBox="0 0 {W} {H}" width="100%" role="img" '
-        f'aria-label="Adoption and retention over time">'
-        f'{"".join(grid)}{polyline(adoption, "--c-blue")}'
-        f'{polyline(retention, "--c-aqua")}{end_labels}</svg>'
-    )
-
-
-# --- MCP App HTML wrapper (self-contained, theme-aware) ---------------------
-def app_html(title: str, subtitle: str, svg: str, legend: list[tuple[str, str]] | None = None) -> str:
-    """Wrap an SVG in the self-contained HTML the MCP App iframe renders."""
-    legend_html = ""
-    if legend:
-        items = "".join(
-            f'<span class="lg"><i style="background:var({var})"></i>{_esc(name)}</span>'
-            for name, var in legend
-        )
-        legend_html = f'<div class="legend">{items}</div>'
-    return f"""<!doctype html>
+TEMPLATE = r"""<!doctype html>
 <html>
   <head>
     <meta charset="utf-8" />
     <style>
-      /* Validated categorical hues, themed for light/dark. */
-      :root {{ --c-blue: #2a78d6; --c-aqua: #1baf7a; }}
-      @media (prefers-color-scheme: dark) {{ :root {{ --c-blue:#3987e5; --c-aqua:#199e70; }} }}
-      :root[data-theme="dark"] {{ --c-blue:#3987e5; --c-aqua:#199e70; }}
-      :root[data-theme="light"] {{ --c-blue:#2a78d6; --c-aqua:#1baf7a; }}
-      body {{ font-family: system-ui, sans-serif; margin: 0;
-              color: var(--mcp-color-text, #1a1a1a); }}
-      .card {{ margin: 1rem; padding: 1rem 1.25rem; border-radius: 12px;
-               border: 1px solid var(--mcp-color-border, #e3e3e8);
-               background: var(--mcp-color-surface, #ffffff); }}
-      h2 {{ font-size: 1.05rem; margin: 0; }}
-      .sub {{ font-size: .8rem; opacity: .6; margin: .15rem 0 .5rem; }}
-      .legend {{ display: flex; gap: 1rem; font-size: .78rem; opacity: .85; margin-top: .25rem; }}
-      .lg {{ display: inline-flex; align-items: center; gap: .35rem; }}
-      .lg i {{ width: 10px; height: 10px; border-radius: 3px; display: inline-block; }}
-      svg text {{ fill: var(--mcp-color-text, #1a1a1a); }}
-      .val {{ font-size: 11px; font-weight: 600; text-anchor: middle; }}
-      .cat {{ font-size: 10px; text-anchor: middle; opacity: .6; }}
-      .tick {{ font-size: 9px; text-anchor: end; opacity: .5; }}
-      .end {{ font-size: 10px; font-weight: 600; }}
-      .axis {{ stroke: var(--mcp-color-border, #d8d8de); stroke-width: 1; }}
-      .grid {{ stroke: var(--mcp-color-border, #ececf0); stroke-width: 1; opacity: .6; }}
+      :root { --c-blue: #2a78d6; --c-aqua: #1baf7a; }
+      :root[data-theme="dark"] { --c-blue: #3987e5; --c-aqua: #199e70; }
+      body { font-family: system-ui, sans-serif; margin: 0;
+             color: var(--mcp-color-text, #1a1a1a); background: transparent; }
+      .card { margin: 1rem; padding: 1rem 1.25rem; border-radius: 12px;
+              border: 1px solid var(--mcp-color-border, #e3e3e8);
+              background: var(--mcp-color-surface, #ffffff); }
+      h2 { font-size: 1.05rem; margin: 0; }
+      .sub { font-size: .8rem; opacity: .6; margin: .15rem 0 .6rem; }
+      .empty { opacity: .5; font-size: .85rem; padding: 1.25rem 0; }
+      /* Robust responsive SVG: 100% width, height from the viewBox aspect. */
+      svg { width: 100%; height: auto; display: block; }
+      svg text { fill: var(--mcp-color-text, #1a1a1a); }
+      .val { font-size: 11px; font-weight: 600; text-anchor: middle; }
+      .cat { font-size: 10px; text-anchor: middle; opacity: .6; }
+      .tick { font-size: 9px; text-anchor: end; opacity: .5; }
+      .end { font-size: 10px; font-weight: 600; }
+      .grid { stroke: var(--mcp-color-border, #ececf0); stroke-width: 1; opacity: .6; }
+      .axis { stroke: var(--mcp-color-border, #d8d8de); stroke-width: 1; }
+      .legend { display: flex; gap: 1rem; font-size: .78rem; opacity: .85; margin-top: .4rem; }
+      .lg { display: inline-flex; align-items: center; gap: .35rem; }
+      .lg i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
     </style>
   </head>
   <body>
     <div class="card">
-      <h2>{_esc(title)}</h2>
-      <div class="sub">{_esc(subtitle)}</div>
-      {svg}
-      {legend_html}
+      <h2 id="title">Product Studio chart</h2>
+      <div class="sub" id="sub">Loading…</div>
+      <div id="chart"><div class="empty">Run a chart tool to populate this.</div></div>
+      <div class="legend" id="legend" style="display:none"></div>
     </div>
+    <script>
+      (function () {
+        var RPC = "2.0", INIT_ID = 1;
+        var STAGES = ["idea", "discovery", "design", "build", "beta", "ga"];
+        function post(m) { (window.parent || window).postMessage(m, "*"); }
+        function esc(s) {
+          return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        }
+        function el(id) { return document.getElementById(id); }
+
+        // --- roadmap bar (single series) ---
+        function bar(counts) {
+          var W = 560, H = 280, pl = 34, pr = 14, pt = 26, pb = 46;
+          var pw = W - pl - pr, ph = H - pt - pb;
+          var data = STAGES.map(function (s) { return [s, counts[s] || 0]; });
+          var vmax = Math.max(1, Math.max.apply(null, data.map(function (d) { return d[1]; })));
+          var n = data.length, slot = pw / n, bw = slot * 0.56, base = pt + ph, out = "";
+          out += '<line x1="' + pl + '" y1="' + base + '" x2="' + (W - pr) + '" y2="' + base + '" class="axis"/>';
+          for (var i = 0; i < n; i++) {
+            var stage = data[i][0], c = data[i][1];
+            var x = pl + i * slot + (slot - bw) / 2, bh = (c / vmax) * ph, y = base - bh;
+            out += '<rect x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + bw.toFixed(1) +
+                   '" height="' + Math.max(bh, 0.5).toFixed(1) + '" rx="4" fill="var(--c-blue)"/>';
+            if (c) out += '<text x="' + (x + bw / 2).toFixed(1) + '" y="' + (y - 6).toFixed(1) + '" class="val">' + c + '</text>';
+            out += '<text x="' + (x + bw / 2).toFixed(1) + '" y="' + (base + 16).toFixed(1) + '" class="cat">' + esc(stage) + '</text>';
+          }
+          return '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Features by stage">' + out + '</svg>';
+        }
+
+        // --- adoption + retention line (two series) ---
+        function line(weeks, adoption, retention) {
+          var W = 560, H = 280, pl = 36, pr = 74, pt = 22, pb = 34;
+          var pw = W - pl - pr, ph = H - pt - pb, n = Math.max(weeks.length, 1);
+          function X(i) { return pl + pw * i / Math.max(n - 1, 1); }
+          function Y(v) { return pt + ph - v * ph; }
+          var out = "";
+          [0, 0.25, 0.5, 0.75, 1].forEach(function (g) {
+            var gy = Y(g);
+            out += '<line x1="' + pl + '" y1="' + gy.toFixed(1) + '" x2="' + (pl + pw).toFixed(1) + '" y2="' + gy.toFixed(1) + '" class="grid"/>';
+            out += '<text x="' + (pl - 6) + '" y="' + (gy + 3).toFixed(1) + '" class="tick">' + Math.round(g * 100) + '%</text>';
+          });
+          function series(vals, v) {
+            var pts = vals.map(function (val, i) { return X(i).toFixed(1) + "," + Y(val).toFixed(1); }).join(" ");
+            var dots = vals.map(function (val, i) {
+              return '<circle cx="' + X(i).toFixed(1) + '" cy="' + Y(val).toFixed(1) + '" r="2.5" fill="var(' + v + ')"/>';
+            }).join("");
+            return '<polyline points="' + pts + '" fill="none" stroke="var(' + v + ')" stroke-width="2"/>' + dots;
+          }
+          out += series(adoption, "--c-blue") + series(retention, "--c-aqua");
+          if (n) {
+            out += '<text x="' + (X(n - 1) + 8).toFixed(1) + '" y="' + (Y(adoption[n - 1]) + 3).toFixed(1) + '" class="end" style="fill:var(--c-blue)">Adoption</text>';
+            out += '<text x="' + (X(n - 1) + 8).toFixed(1) + '" y="' + (Y(retention[n - 1]) + 3).toFixed(1) + '" class="end" style="fill:var(--c-aqua)">Retention</text>';
+          }
+          return '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Adoption and retention over time">' + out + '</svg>';
+        }
+
+        function render(sc) {
+          var chart = el("chart"), sub = el("sub"), title = el("title"), legend = el("legend");
+          if (sc && sc.counts) {
+            var total = 0; for (var k in sc.counts) total += sc.counts[k];
+            title.textContent = "Roadmap by stage";
+            sub.textContent = total + " " + (sc.scope || "features");
+            chart.innerHTML = bar(sc.counts); legend.style.display = "none";
+          } else if (sc && sc.weeks && sc.weeks.length) {
+            title.textContent = (sc.feature || "Feature") + ": adoption & retention";
+            sub.textContent = sc.weeks.length + " weeks";
+            chart.innerHTML = line(sc.weeks, sc.adoption || [], sc.retention || []);
+            legend.innerHTML = '<span class="lg"><i style="background:var(--c-blue)"></i>Adoption</span>' +
+                               '<span class="lg"><i style="background:var(--c-aqua)"></i>Retention</span>';
+            legend.style.display = "flex";
+          } else {
+            sub.textContent = "";
+            chart.innerHTML = '<div class="empty">No chart data for this request.</div>';
+            legend.style.display = "none";
+          }
+        }
+
+        function applyTheme(hc) {
+          if (!hc) return;
+          var root = document.documentElement;
+          if (hc.theme) root.setAttribute("data-theme", hc.theme);
+          var vars = (hc.styles && hc.styles.variables) || {};
+          for (var name in vars) { if (vars[name] != null) root.style.setProperty(name, vars[name]); }
+        }
+
+        window.addEventListener("message", function (ev) {
+          if (ev.source !== window.parent) return;
+          var m = ev.data; if (!m || m.jsonrpc !== RPC) return;
+          if (m.id === INIT_ID && m.result) {
+            applyTheme(m.result.hostContext);
+            post({ jsonrpc: RPC, method: "ui/notifications/initialized" });
+          } else if (m.method === "ui/notifications/tool-result") {
+            render(m.params && m.params.structuredContent);
+          } else if (m.method === "ui/notifications/host-context-changed") {
+            applyTheme(m.params);
+          }
+        });
+
+        post({ jsonrpc: RPC, id: INIT_ID, method: "ui/initialize",
+               params: { protocolVersion: "2026-01-26", appCapabilities: {} } });
+      })();
+    </script>
   </body>
 </html>"""
+
+
+def template_html() -> str:
+    """The chart MCP App template (the ``ui://`` resource Connext renders)."""
+    return TEMPLATE

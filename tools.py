@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 
-from mcp.types import EmbeddedResource, TextContent, TextResourceContents
+from mcp.types import TextContent
 
 from fastmcp import FastMCP
 from fastmcp.server.dependencies import get_access_token
@@ -136,15 +136,11 @@ def register_tools(mcp: FastMCP) -> None:
             conn.close()
         total = sum(counts.values())
         scope = f"{owner}'s features" if owner else "all features"
-        svg = charts.roadmap_bar(counts)
-        html = charts.app_html("Roadmap by stage", f"{total} {scope}", svg)
+        # The chart is drawn by the ui:// template (charts.py) from this
+        # structured_content, which Connext delivers over the MCP App bridge.
         return ToolResult(
             content=[
                 TextContent(type="text", text=f"Roadmap chart: {total} {scope} — {counts}"),
-                EmbeddedResource(
-                    type="resource",
-                    resource=TextResourceContents(uri=CHART_URI, mimeType=CHART_MIME, text=html),
-                ),
             ],
             structured_content={"scope": scope, "counts": counts},
         )
@@ -190,23 +186,13 @@ def register_tools(mcp: FastMCP) -> None:
         weeks = [r["week"] for r in series]
         adoption = [r["adoption"] for r in series]
         retention = [r["retention"] for r in series]
-        svg = charts.adoption_line(weeks, adoption, retention)
-        html = charts.app_html(
-            f"{frow['title']}: adoption & retention",
-            f"{len(weeks)} weeks · latest adoption {adoption[-1]:.0%}",
-            svg,
-            legend=[("Adoption", "--c-blue"), ("Retention", "--c-aqua")],
-        )
+        # The ui:// template (charts.py) draws the line chart from this data.
         return ToolResult(
             content=[
                 TextContent(
                     type="text",
                     text=f"{frow['title']}: adoption {adoption[0]:.0%}→{adoption[-1]:.0%}, "
                     f"retention {retention[0]:.0%}→{retention[-1]:.0%}",
-                ),
-                EmbeddedResource(
-                    type="resource",
-                    resource=TextResourceContents(uri=CHART_URI, mimeType=CHART_MIME, text=html),
                 ),
             ],
             structured_content={
@@ -217,8 +203,11 @@ def register_tools(mcp: FastMCP) -> None:
             },
         )
 
-    # The shared chart UI template (served via resources/read). The live charts
-    # are returned inline by the tools above; this is the fallback placeholder.
+    # The shared chart MCP App (served via resources/read). This is the DYNAMIC
+    # ui:// template both chart tools reference: its JS implements the SEP-1865
+    # bridge, receives the tool's structured_content, and draws the SVG. Connext
+    # renders THIS (not an inline result), so the drawing lives here, not in the
+    # tool result.
     @mcp.resource(
         CHART_URI,
         name="product-studio-chart",
@@ -226,4 +215,4 @@ def register_tools(mcp: FastMCP) -> None:
         meta={"ui": {"csp": {"connectDomains": [], "resourceDomains": []}, "prefersBorder": True}},
     )
     async def chart_template() -> str:
-        return charts.app_html("Product Studio chart", "Run a chart tool to populate this.", "")
+        return charts.template_html()
