@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcp-server-product-studio"
+version = "0.1.0"
+description = "A full-feature FastMCP example for Connext: a product-development copilot with its own login, a RAG tool, a read-only SQL tool over a seeded product database, and chart MCP Apps."
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp>=3.4,<4",
+]
+
+[tool.setuptools]
+py-modules = ["server", "auth", "tools", "db", "rag", "charts"]
