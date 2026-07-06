@@ -10,8 +10,11 @@ copilot**. It shows how to combine, in one server:
   BM25 retriever.
 - 🗄️ **A SQL tool** — a **read-only** SQL query over a seeded product database
   (features / experiments / metrics).
-- 📊 **A chart MCP App** — tools that return an inline-SVG chart Connext renders
-  in the chat, derived from the product data.
+- 📊 **A chart MCP App** — tools that render an SVG chart (in the chat), derived
+  from the product data.
+- 📝 **A writable form MCP App** — a feedback form the user fills in *on the
+  Connext side*; on Save it calls a tool back over the app bridge and the server
+  **persists** the note, then re-renders the saved list.
 - 👤 **Per-user identity** — tools run *as the signed-in user* (e.g. "my features").
 
 It's **fully self-contained**: a seeded in-memory SQLite database + an in-memory
@@ -26,7 +29,8 @@ doc corpus, so it clones and runs with **zero external services**. Built on
 | --- | --- | --- |
 | Retrieve unstructured context (the "why") | `search_product_docs` | `rag.py` — BM25 over a doc corpus |
 | Query structured records (the "what/when") | `run_sql`, `describe_data` | `db.py` — read-only SQLite |
-| Visualise the data | `chart_roadmap`, `chart_feature_adoption` | `charts.py` — inline SVG MCP App |
+| Visualise the data | `chart_roadmap`, `chart_feature_adoption` | `charts.py` — dynamic SVG MCP App |
+| **Capture input that persists** | `feedback_form`, `log_feedback` | `feedback.py` — a **writable** form MCP App |
 | Know who's asking | all of them | own OAuth login (`auth.py`) |
 
 The demo interactions that show them working together:
@@ -34,6 +38,7 @@ The demo interactions that show them working together:
 - *"What are customers saying about onboarding?"* → **RAG**
 - *"Show build-stage features ranked by RICE"* → **SQL** → **chart**
 - *"How is the Onboarding checklist doing?"* → **SQL** + **adoption chart**
+- *"Log some feedback about SSO"* → **form** → the note is **saved** and shown
 - *"Draft next sprint's priorities"* → **RAG** (pain points) **+** **SQL** (backlog)
 
 ---
@@ -79,9 +84,17 @@ read-only statement — a tool can never mutate the data. The signed-in username
 available for `WHERE owner = '<username>'`.
 
 **`chart_roadmap(owner=None)`** and **`chart_feature_adoption(feature)`** — MCP
-Apps. Each returns a `ToolResult` carrying both a text summary (what the model
-reads) **and** a `ui://` resource with self-contained HTML+SVG (what the user
-sees). Connext renders the HTML in a sandboxed iframe.
+Apps. Each returns a text summary (what the model reads) **and**
+`structuredContent` (the chart data). Connext reads the shared
+`ui://product-studio/chart` template and its JavaScript draws the SVG from that
+data over the app bridge (see [MCP Apps](#mcp-apps-charts-read--a-form-write)).
+
+**`feedback_form()` → `log_feedback(feature, sentiment, note)`** — a **writable**
+MCP App. `feedback_form` opens the form with the feature list + recent notes; on
+Save, the form's JS calls `log_feedback` back over the `tools/call` bridge, which
+does a single parameterized `INSERT` (a read-write connection — `run_sql` stays
+read-only) and returns the updated list. **Mark `log_feedback` app-callable in
+Connext** so the form is allowed to call it.
 
 ---
 
@@ -101,28 +114,35 @@ notes) that reference the same features, so RAG and SQL tell a **joined** story.
 
 ---
 
-## The chart MCP App
+## MCP Apps: charts (read) + a form (write)
 
-An MCP App is a tool whose result includes a `ui://` **resource** carrying HTML.
-The charts here are **inline SVG** built in `charts.py` — no external scripts or
-assets, so they render under the iframe's strict Content-Security-Policy — and
-they use the host's `var(--mcp-color-*)` variables so they match the chat's
-light/dark theme. The two-series colours are a **validated** categorical palette
-(blue/aqua, checked for colour-blind separation and contrast).
+An MCP App is a `ui://` HTML **resource** the host renders in a sandboxed iframe.
+Connext reads the resource (`resources/read`) and talks to it over the SEP-1865
+JSON-RPC bridge (`postMessage`), so the drawing/logic lives in the template's
+**inline JS** — no external scripts or assets (strict CSP) — and it reads the
+host's `var(--mcp-color-*)` theme tokens. Each template also reports its height
+via `ui/notifications/size-changed` so the host fits the iframe to the content.
 
-```python
-# a chart tool returns text (for the model) + a ui:// resource (for the user)
-return ToolResult(
-    content=[
-        TextContent(text="Roadmap chart: 6 alice's features — {...}"),
-        EmbeddedResource(resource=TextResourceContents(
-            uri="ui://product-studio/chart",
-            mimeType="text/html;profile=mcp-app",
-            text="<!doctype html>…<svg>…</svg>…")),
-    ],
-    structured_content={"counts": {...}},
-)
+**Charts (read-only)** — `charts.py`. The tool sends the chart **data** as
+`structuredContent`; the host delivers it to the template
+(`ui/notifications/tool-result`) and the JS renders the SVG. The two-series
+colours are a **validated** categorical palette (blue/aqua, checked for
+colour-blind separation and contrast).
+
+**Form (writable)** — `feedback.py`. Same bridge, plus the **write** direction:
+on Save the form calls a tool back with `tools/call`, which the host proxies to
+the server (gated by the **app-callable** allowlist):
+
+```js
+// inside the form template — call the server's write tool over the bridge
+parent.postMessage({ jsonrpc: "2.0", id: 7, method: "tools/call",
+  params: { name: "log_feedback",
+            arguments: { feature, sentiment, note } } }, "*");
+// host replies with the CallToolResult -> re-render the saved list
 ```
+
+The server persists the note and returns the updated list, which the form shows —
+the full **form → persist → read-back** loop, driven from the Connext side.
 
 ---
 
@@ -135,7 +155,8 @@ drives standard OAuth 2.1 with dynamic client registration:
    that URL (every OAuth discovery endpoint is built from it).
 2. **Register it in Connext** (Admin → MCP Servers → Add): URL
    `https://<your-host>/mcp`, Transport HTTP, Auth OAuth, client id/secret blank
-   (dynamic registration handles it). Enable **Allow UI** so the charts render.
+   (dynamic registration handles it). Enable **Allow UI** so the apps render, and
+   mark **`log_feedback` app-callable** so the feedback form is allowed to save.
 3. **Connect as a user** — click Connect, sign in on this server's login page, and
    the agent can call the tools *as that user*.
 
@@ -165,8 +186,9 @@ For a real deployment:
 | ---- | ------------ |
 | `server.py` | Entry point: seeds the DB, builds the FastMCP server with its own OAuth login, registers tools + `/health`, runs it. |
 | `auth.py` | The OAuth provider + login page + demo users (from `mcp-server-example`). |
-| `db.py` | Seeded, **read-only** SQLite: `features` / `experiments` / `metrics`, plus the schema the SQL tool advertises. |
+| `db.py` | Seeded SQLite: `features` / `experiments` / `metrics` (read-only) + `feedback` (writable via the form), plus the schema the SQL tool advertises. |
 | `rag.py` | The document corpus + a dependency-free BM25 retriever. |
-| `tools.py` | The five tools: `search_product_docs`, `run_sql`, `describe_data`, `chart_roadmap`, `chart_feature_adoption`. |
-| `charts.py` | Theme-aware inline-SVG chart builders + the MCP App HTML wrapper. |
+| `tools.py` | The seven tools: `search_product_docs`, `run_sql`, `describe_data`, `chart_roadmap`, `chart_feature_adoption`, `feedback_form`, `log_feedback`. |
+| `charts.py` | The dynamic chart MCP App template (SVG drawn in-browser from the tool's data over the app bridge). |
+| `feedback.py` | The **writable** feedback-form MCP App template (calls `log_feedback` back over the `tools/call` bridge). |
 | `examples/connect_with_client.py` | A client that runs the same OAuth flow Connext does. |

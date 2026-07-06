@@ -5,8 +5,11 @@ Four capabilities over the seeded data (db.py) and doc corpus (rag.py):
   1. ``search_product_docs`` — RAG over customer interviews / feedback / PRDs.
   2. ``run_sql``             — a READ-ONLY SQL query over the product tables.
   3. ``describe_data``       — the schema, so the model can write ``run_sql``.
-  4. ``chart_roadmap`` / ``chart_feature_adoption`` — MCP Apps that render a
-                               chart (inline SVG) from the product data.
+  4. ``chart_roadmap`` / ``chart_feature_adoption`` — read-only MCP Apps that
+                               render a chart from the product data.
+  5. ``feedback_form`` / ``log_feedback`` — a WRITABLE MCP App: the form calls
+                               ``log_feedback`` back over the tools/call bridge to
+                               persist a note, then re-renders the saved list.
 
 All tools run *as the signed-in user*; the SQL/chart tools can scope to
 ``owner = <username>`` for "my features" questions.
@@ -15,6 +18,7 @@ All tools run *as the signed-in user*; the SQL/chart tools can scope to
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 
 from mcp.types import TextContent
 
@@ -24,10 +28,17 @@ from fastmcp.tools.tool import ToolResult
 
 import charts
 import db
+import feedback
 import rag
 
 CHART_URI = "ui://product-studio/chart"
+FEEDBACK_URI = "ui://product-studio/feedback"
 CHART_MIME = "text/html;profile=mcp-app"
+
+# Feedback-form write tool: allowed sentiments + a note length cap.
+_SENTIMENTS = {"positive", "neutral", "negative"}
+_NOTE_MAX = 500
+_FEEDBACK_RECENT = 8
 
 # run_sql is defence-in-depth. The connection is already read-only (mode=ro,
 # the real guard), and we additionally require a single statement that STARTS
@@ -45,6 +56,19 @@ _MAX_ROWS = 200
 def _current_user() -> str:
     token = get_access_token()
     return token.subject if (token and token.subject) else "guest"
+
+
+def _recent_feedback(conn, limit: int = _FEEDBACK_RECENT) -> list[dict]:
+    rows = conn.execute(
+        "SELECT feature, sentiment, note, submitted_by, created_at FROM feedback "
+        "ORDER BY id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _feature_titles(conn) -> list[str]:
+    return [r["title"] for r in conn.execute("SELECT title FROM features ORDER BY title")]
 
 
 def register_tools(mcp: FastMCP) -> None:
@@ -216,3 +240,82 @@ def register_tools(mcp: FastMCP) -> None:
     )
     async def chart_template() -> str:
         return charts.template_html()
+
+    # --- 5. Feedback form MCP App: a WRITABLE app --------------------------
+    # feedback_form opens the form; log_feedback is what the form CALLS BACK over
+    # the tools/call bridge to persist a note (mark it app-callable in Connext).
+    @mcp.tool(
+        name="feedback_form",
+        description=(
+            "Open a form for the user to log a piece of customer feedback about a "
+            "feature. They pick the feature + sentiment, write a note, and it is "
+            "saved in Product Studio and shown in the recent-feedback list."
+        ),
+        meta={"ui": {"resourceUri": FEEDBACK_URI, "visibility": ["model", "app"]}},
+    )
+    async def feedback_form() -> ToolResult:
+        conn = db.connect_readonly()
+        try:
+            features = _feature_titles(conn)
+            recent = _recent_feedback(conn)
+        finally:
+            conn.close()
+        return ToolResult(
+            content=[
+                TextContent(type="text", text=f"Feedback form ({len(recent)} recent notes)."),
+            ],
+            structured_content={"features": features, "recent": recent},
+        )
+
+    @mcp.tool(
+        name="log_feedback",
+        description=(
+            "Save a customer-feedback note about a feature. This is the write tool "
+            "the feedback form calls over the app bridge (enable it as app-callable "
+            "in Connext). sentiment must be positive, neutral, or negative."
+        ),
+    )
+    async def log_feedback(feature: str, sentiment: str, note: str) -> ToolResult:
+        feature = (feature or "").strip()
+        note = (note or "").strip()
+        sentiment = (sentiment or "").strip().lower()
+        if not feature:
+            raise ValueError("feature is required.")
+        if sentiment not in _SENTIMENTS:
+            raise ValueError("sentiment must be positive, neutral, or negative.")
+        if not note:
+            raise ValueError("note is required.")
+        note = note[:_NOTE_MAX]
+        conn = db.connect_writable()
+        try:
+            conn.execute(
+                "INSERT INTO feedback (feature, sentiment, note, submitted_by, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    feature,
+                    sentiment,
+                    note,
+                    _current_user(),
+                    datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                ),
+            )
+            conn.commit()
+            recent = _recent_feedback(conn)
+        finally:
+            conn.close()
+        return ToolResult(
+            content=[
+                TextContent(type="text", text=f"Saved {sentiment} feedback on '{feature}'."),
+            ],
+            structured_content={"saved": True, "recent": recent},
+        )
+
+    # The feedback form UI template (served via resources/read, like the chart).
+    @mcp.resource(
+        FEEDBACK_URI,
+        name="product-studio-feedback",
+        mime_type=CHART_MIME,
+        meta={"ui": {"csp": {"connectDomains": [], "resourceDomains": []}, "prefersBorder": True}},
+    )
+    async def feedback_template() -> str:
+        return feedback.template_html()

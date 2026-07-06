@@ -52,6 +52,14 @@ CREATE TABLE metrics (
     adoption    REAL NOT NULL,      -- fraction of active accounts using it
     retention   REAL NOT NULL       -- week-4 retention of adopters
 );
+CREATE TABLE feedback (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    feature      TEXT NOT NULL,     -- feature title the note is about
+    sentiment    TEXT NOT NULL,     -- positive | neutral | negative
+    note         TEXT NOT NULL,
+    submitted_by TEXT NOT NULL,     -- the signed-in username
+    created_at   TEXT NOT NULL      -- ISO timestamp
+);
 """
 
 # (id, title, stage, priority, rice, effort_weeks, owner, target_release)
@@ -84,6 +92,21 @@ EXPERIMENTS = [
      "d7_retention", 0.41, 0.44, 7.3, "running"),
     (5, 7, "Team invites lift week-4 account retention",
      "w4_retention", 0.58, 0.60, 3.4, "inconclusive"),
+]
+
+# (id, feature, sentiment, note, submitted_by, created_at) — seeded so the
+# feedback form's "Recent" list starts non-empty; the log_feedback tool (called
+# BY the MCP App form over the tools/call bridge) appends to this table.
+FEEDBACK = [
+    (1, "Onboarding checklist", "positive",
+     "Love the guided checklist — new-account activation is way up.",
+     "priya", "2026-06-18T09:12:00"),
+    (2, "Export to CSV", "neutral",
+     "Works, but the export is slow for our biggest accounts.",
+     "alice", "2026-06-21T14:03:00"),
+    (3, "Guided templates", "positive",
+     "Templates cut our time-to-first-value roughly in half.",
+     "priya", "2026-06-25T11:40:00"),
 ]
 
 
@@ -124,6 +147,7 @@ def init_db() -> str:
             "INSERT INTO experiments VALUES (?,?,?,?,?,?,?,?)", EXPERIMENTS
         )
         conn.executemany("INSERT INTO metrics VALUES (?,?,?,?)", _metric_series())
+        conn.executemany("INSERT INTO feedback VALUES (?,?,?,?,?,?)", FEEDBACK)
         conn.commit()
     finally:
         conn.close()
@@ -132,9 +156,22 @@ def init_db() -> str:
 
 
 def connect_readonly() -> sqlite3.Connection:
-    """Open the seeded DB **read-only** so tools cannot mutate it."""
+    """Open the seeded DB **read-only** so the SQL tool cannot mutate it."""
     conn = sqlite3.connect(f"file:{init_db()}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=3000")  # wait out the brief feedback-INSERT lock
+    return conn
+
+
+def connect_writable() -> sqlite3.Connection:
+    """Open the seeded DB read-WRITE — used ONLY by the log_feedback tool, which
+    does a single parameterized INSERT into ``feedback``. Everything else uses
+    ``connect_readonly()``, so arbitrary SQL still cannot mutate the DB. Writes
+    persist for the lifetime of this server process (the file is re-seeded on
+    restart; point this at a real database to persist across restarts)."""
+    conn = sqlite3.connect(init_db())
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=3000")
     return conn
 
 
@@ -147,4 +184,6 @@ features(id, title, stage, priority, rice_score, effort_weeks, owner, target_rel
 experiments(id, feature_id→features.id, hypothesis, metric, control, variant, lift_pct, status)
   status   ∈ running, complete, inconclusive
 metrics(feature_id→features.id, week, adoption, retention)
-  weekly time series; adoption/retention are fractions in [0,1]"""
+  weekly time series; adoption/retention are fractions in [0,1]
+feedback(id, feature, sentiment, note, submitted_by, created_at)
+  sentiment ∈ positive, neutral, negative   (submitted via the feedback form)"""
