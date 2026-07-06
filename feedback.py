@@ -33,7 +33,7 @@ TEMPLATE = r"""<!doctype html>
               background: var(--mcp-color-surface, #ffffff); }
       h2 { font-size: 1.05rem; margin: 0; }
       .sub { font-size: .8rem; opacity: .6; margin: .15rem 0 .8rem; }
-      form { display: flex; flex-direction: column; gap: .6rem; }
+      .form { display: flex; flex-direction: column; gap: .6rem; }
       label.field { display: flex; flex-direction: column; gap: .25rem;
                     font-size: .78rem; opacity: .75; }
       select, textarea {
@@ -69,7 +69,7 @@ TEMPLATE = r"""<!doctype html>
     <div class="card">
       <h2>Log customer feedback</h2>
       <div class="sub">Capture a note about a feature — it's saved in Product Studio.</div>
-      <form id="form">
+      <div class="form" id="form">
         <label class="field">Feature
           <select id="feature"></select>
         </label>
@@ -84,10 +84,10 @@ TEMPLATE = r"""<!doctype html>
           <textarea id="note" placeholder="What did the customer say?"></textarea>
         </label>
         <div class="row">
-          <button type="submit" id="save">Save feedback</button>
+          <button type="button" id="save">Save feedback</button>
           <span class="status" id="status"></span>
         </div>
-      </form>
+      </div>
       <div class="recent">
         <div class="rhead">Recent</div>
         <ul id="list"><li class="muted">Loading…</li></ul>
@@ -202,7 +202,9 @@ TEMPLATE = r"""<!doctype html>
           }
         });
 
-        el("form").addEventListener("submit", onSubmit);
+        // A plain button + click handler — NOT a native <form> submit, which the
+        // MCP App iframe (sandbox="allow-scripts", no allow-forms) would block.
+        el("save").addEventListener("click", onSubmit);
         if (window.ResizeObserver) new window.ResizeObserver(postSize).observe(document.body);
         postSize();
         post({ jsonrpc: RPC, id: INIT_ID, method: "ui/initialize",
